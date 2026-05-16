@@ -1,0 +1,171 @@
+<?php
+
+namespace App\Http\Controllers;
+use App\Exports\RekapAbsensiExport;
+use Maatwebsite\Excel\Facades\Excel;
+use Barryvdh\DomPDF\Facade\Pdf;
+
+use App\Models\Attendance;
+use App\Models\AttendanceSession;
+use App\Models\Prayer;
+use App\Models\Student;
+use App\Services\PrayerTimeService;
+use Illuminate\Http\Request;
+use Illuminate\Support\Carbon;
+
+class RekapController extends Controller
+{
+    public function index(Request $request, PrayerTimeService $prayerService)
+    {
+        $date = $request->input('date', Carbon::today()->toDateString());
+        $groupKelas = $request->input('kelas'); // string
+        $groupKamar = $request->input('kamar'); // string
+
+        $prayers = Prayer::where('is_active', true)->orderBy('order')->get();
+
+        // default: sholat aktif jika ada, kalau tidak: prayer pertama
+        $defaultPrayer = $prayerService->getActivePrayer() ?: $prayers->first();
+        $prayerId = (int)($request->input('prayer_id', $defaultPrayer?->id));
+
+        $selectedPrayer = $prayers->firstWhere('id', $prayerId) ?: $defaultPrayer;
+
+        // Total santri (bisa difilter)
+        $studentsQuery = Student::query()->where('is_active', true);
+        if ($groupKelas) $studentsQuery->where('kelas', $groupKelas);
+        if ($groupKamar) $studentsQuery->where('kamar', $groupKamar);
+        $totalStudents = (clone $studentsQuery)->count();
+
+        // Session untuk tanggal+sholat
+        $session = null;
+        if ($selectedPrayer) {
+            $session = AttendanceSession::firstOrCreate(
+                ['date' => $date, 'prayer_id' => $selectedPrayer->id],
+                ['status' => 'live']
+            );
+        }
+
+        // Attendance yang sudah scan
+        $attQuery = Attendance::query()
+            ->with(['student'])
+            ->when($session, fn($q) => $q->where('attendance_session_id', $session->id))
+            ->when($groupKelas, fn($q) => $q->whereHas('student', fn($s) => $s->where('kelas', $groupKelas)))
+            ->when($groupKamar, fn($q) => $q->whereHas('student', fn($s) => $s->where('kamar', $groupKamar)));
+
+        $hadirCount = (clone $attQuery)->where('status', 'hadir')->count();
+        $terlambatCount = (clone $attQuery)->where('status', 'terlambat')->count();
+        $sudahCount = $hadirCount + $terlambatCount;
+        $belumCount = max(0, $totalStudents - $sudahCount);
+
+        $attendances = (clone $attQuery)
+            ->orderByDesc('scanned_at')
+            ->paginate(15)
+            ->withQueryString();
+
+        // List belum absen (ambil ID student yang sudah absen, lalu query student sisanya)
+        $absentStudents = collect();
+        if ($session) {
+            $presentIds = Attendance::where('attendance_session_id', $session->id)
+                ->when($groupKelas || $groupKamar, function ($q) use ($groupKelas, $groupKamar) {
+                    $q->whereHas('student', function ($s) use ($groupKelas, $groupKamar) {
+                        if ($groupKelas) $s->where('kelas', $groupKelas);
+                        if ($groupKamar) $s->where('kamar', $groupKamar);
+                    });
+                })
+                ->pluck('student_id');
+
+            $absentStudents = (clone $studentsQuery)
+                ->whereNotIn('id', $presentIds)
+                ->orderBy('name')
+                ->limit(30) // biar ringan, nanti bisa paginasi juga
+                ->get();
+        }
+
+        // dropdown filter kelas/kamar dari DB
+        $kelasList = Student::whereNotNull('kelas')->distinct()->orderBy('kelas')->pluck('kelas');
+        $kamarList = Student::whereNotNull('kamar')->distinct()->orderBy('kamar')->pluck('kamar');
+
+        return view('rekap.index', compact(
+            'date',
+            'prayers',
+            'selectedPrayer',
+            'prayerId',
+            'kelasList',
+            'kamarList',
+            'groupKelas',
+            'groupKamar',
+            'totalStudents',
+            'hadirCount',
+            'terlambatCount',
+            'belumCount',
+            'attendances',
+            'absentStudents'
+        ));
+    }
+
+    public function exportExcel(Request $request, PrayerTimeService $prayerService)
+    {
+        $date = $request->input('date', now()->toDateString());
+        $kelas = $request->input('kelas');
+        $kamar = $request->input('kamar');
+
+        $prayers = \App\Models\Prayer::where('is_active', true)->orderBy('order')->get();
+        $defaultPrayer = $prayerService->getActivePrayer() ?: $prayers->first();
+        $prayerId = (int)($request->input('prayer_id', $defaultPrayer?->id));
+        $selectedPrayer = $prayers->firstWhere('id', $prayerId) ?: $defaultPrayer;
+
+        if (!$selectedPrayer) abort(404, 'Sholat tidak ditemukan.');
+
+        $filename = 'Rekap-'.$selectedPrayer->name.'-'.$date.'.xlsx';
+
+        return Excel::download(
+            new RekapAbsensiExport($date, $selectedPrayer->id, $kelas, $kamar, $selectedPrayer->name),
+            $filename
+        );
+    }
+
+    public function exportPdf(Request $request, PrayerTimeService $prayerService)
+    {
+        $date = $request->input('date', now()->toDateString());
+        $kelas = $request->input('kelas');
+        $kamar = $request->input('kamar');
+
+        $prayers = \App\Models\Prayer::where('is_active', true)->orderBy('order')->get();
+        $defaultPrayer = $prayerService->getActivePrayer() ?: $prayers->first();
+        $prayerId = (int)($request->input('prayer_id', $defaultPrayer?->id));
+        $selectedPrayer = $prayers->firstWhere('id', $prayerId) ?: $defaultPrayer;
+
+        if (!$selectedPrayer) abort(404, 'Sholat tidak ditemukan.');
+
+        // Ambil session + data sama seperti rekap
+        $session = \App\Models\AttendanceSession::firstOrCreate(
+            ['date' => $date, 'prayer_id' => $selectedPrayer->id],
+            ['status' => 'live']
+        );
+
+        $attendances = \App\Models\Attendance::with('student')
+            ->where('attendance_session_id', $session->id)
+            ->when($kelas, fn($q) => $q->whereHas('student', fn($s) => $s->where('kelas', $kelas)))
+            ->when($kamar, fn($q) => $q->whereHas('student', fn($s) => $s->where('kamar', $kamar)))
+            ->orderBy('scanned_at')
+            ->get();
+
+        $totalStudents = \App\Models\Student::where('is_active', true)
+            ->when($kelas, fn($q) => $q->where('kelas', $kelas))
+            ->when($kamar, fn($q) => $q->where('kamar', $kamar))
+            ->count();
+
+        $hadirCount = $attendances->where('status','hadir')->count();
+        $terlambatCount = $attendances->where('status','terlambat')->count();
+        $belumCount = max(0, $totalStudents - ($hadirCount + $terlambatCount));
+
+        $pdf = Pdf::loadView('rekap.pdf', compact(
+            'date','kelas','kamar','selectedPrayer',
+            'attendances','totalStudents','hadirCount','terlambatCount','belumCount'
+        ))->setPaper('A4', 'portrait');
+
+        $filename = 'Rekap-'.$selectedPrayer->name.'-'.$date.'.pdf';
+        return $pdf->download($filename);
+    }
+
+
+}
