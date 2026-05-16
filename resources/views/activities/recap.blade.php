@@ -8,16 +8,20 @@
     <div class="text-muted small">Rekap absensi kegiatan keasramaan</div>
   </div>
   <a href="{{ route('activities.scan') }}" class="btn btn-success btn-sm">Scan Kegiatan</a>
+  <a href="{{ route('activities.recap.export.excel', request()->query()) }}"
+   class="btn btn-outline-success btn-sm">
+  Export Excel
+</a>
 </div>
 
 <form class="card p-3 mb-3" method="GET">
   <div class="row g-2 align-items-end">
-    <div class="col-6 col-md-4">
+    <div class="col-6 col-md-3">
       <label class="form-label small mb-1">Tanggal</label>
       <input type="date" name="date" class="form-control form-control-sm" value="{{ $date }}">
     </div>
 
-    <div class="col-6 col-md-5">
+    <div class="col-6 col-md-3">
       <label class="form-label small mb-1">Kegiatan</label>
       <select name="activity_id" class="form-select form-select-sm">
         @foreach($activities as $a)
@@ -28,9 +32,35 @@
       </select>
     </div>
 
-    <div class="col-12 col-md-3 d-grid">
+    <div class="col-6 col-md-2">
+      <label class="form-label small mb-1">Kelas</label>
+      <select name="kelas" class="form-select form-select-sm">
+        <option value="">Semua</option>
+        @foreach($kelasList as $k)
+          <option value="{{ $k }}" @selected($kelas === $k)>{{ $k }}</option>
+        @endforeach
+      </select>
+    </div>
+
+    <div class="col-6 col-md-2">
+      <label class="form-label small mb-1">Kamar</label>
+      <select name="kamar" class="form-select form-select-sm">
+        <option value="">Semua</option>
+        @foreach($kamarList as $km)
+          <option value="{{ $km }}" @selected($kamar === $km)>{{ $km }}</option>
+        @endforeach
+      </select>
+    </div>
+
+    <div class="col-12 col-md-2 d-grid">
       <button class="btn btn-primary btn-sm">Terapkan</button>
     </div>
+  </div>
+
+  <div class="mt-2 text-end">
+    <a href="{{ route('activities.recap') }}" class="btn btn-link btn-sm text-decoration-none">
+      Reset
+    </a>
   </div>
 </form>
 

@@ -101,7 +101,8 @@ Route::post('/kegiatan', [ActivityController::class, 'store'])
     ->name('activities.store');
 Route::delete('/kegiatan/{activity}', [ActivityController::class, 'destroy'])
     ->name('activities.destroy');
-
+Route::get('/rekap-kegiatan/export/excel', [ActivityRecapController::class, 'exportExcel'])
+    ->name('activities.recap.export.excel');
 Route::middleware('auth')->group(function () {
     Route::get('/profile', [ProfileController::class, 'show'])->name('profile.show');
 });

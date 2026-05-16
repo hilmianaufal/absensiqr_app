@@ -7,7 +7,8 @@ use App\Models\ActivityAttendance;
 use App\Models\ActivitySession;
 use App\Models\Student;
 use Illuminate\Http\Request;
-use Illuminate\Support\Carbon;
+use App\Exports\ActivityRecapExport;
+use Maatwebsite\Excel\Facades\Excel;
 
 class ActivityRecapController extends Controller
 {
@@ -15,11 +16,29 @@ class ActivityRecapController extends Controller
     {
         $date = $request->input('date', now()->toDateString());
         $activityId = $request->input('activity_id');
+        $kelas = $request->input('kelas');
+        $kamar = $request->input('kamar');
 
         $activities = Activity::orderBy('order')->get();
+
         $selectedActivity = $activityId
             ? Activity::find($activityId)
             : $activities->first();
+
+        $kelasList = Student::whereNotNull('kelas')
+            ->distinct()
+            ->orderBy('kelas')
+            ->pluck('kelas');
+
+        $kamarList = Student::whereNotNull('kamar')
+            ->distinct()
+            ->orderBy('kamar')
+            ->pluck('kamar');
+
+        $studentsQuery = Student::query()
+            ->where('is_active', true)
+            ->when($kelas, fn ($q) => $q->where('kelas', $kelas))
+            ->when($kamar, fn ($q) => $q->where('kamar', $kamar));
 
         $session = null;
         $attendances = collect();
@@ -33,25 +52,36 @@ class ActivityRecapController extends Controller
             if ($session) {
                 $attendances = ActivityAttendance::with('student')
                     ->where('activity_session_id', $session->id)
+                    ->when($kelas, fn ($q) => $q->whereHas('student', fn ($s) => $s->where('kelas', $kelas)))
+                    ->when($kamar, fn ($q) => $q->whereHas('student', fn ($s) => $s->where('kamar', $kamar)))
                     ->orderByDesc('scanned_at')
                     ->get();
 
                 $presentIds = $attendances->pluck('student_id');
 
-                $absentStudents = Student::where('is_active', true)
+                $absentStudents = (clone $studentsQuery)
                     ->whereNotIn('id', $presentIds)
+                    ->orderBy('name')
+                    ->get();
+            } else {
+                $absentStudents = (clone $studentsQuery)
                     ->orderBy('name')
                     ->get();
             }
         }
 
-        $totalStudents = Student::where('is_active', true)->count();
+        $totalStudents = (clone $studentsQuery)->count();
         $hadirCount = $attendances->where('status', 'hadir')->count();
         $terlambatCount = $attendances->where('status', 'terlambat')->count();
         $belumCount = max(0, $totalStudents - ($hadirCount + $terlambatCount));
 
         return view('activities.recap', compact(
             'date',
+            'activityId',
+            'kelas',
+            'kamar',
+            'kelasList',
+            'kamarList',
             'activities',
             'selectedActivity',
             'session',
@@ -62,5 +92,31 @@ class ActivityRecapController extends Controller
             'terlambatCount',
             'belumCount'
         ));
+    }
+
+    public function exportExcel(Request $request)
+    {
+        $date = $request->input('date', now()->toDateString());
+        $activityId = (int) $request->input('activity_id');
+        $kelas = $request->input('kelas');
+        $kamar = $request->input('kamar');
+
+        $activity = Activity::findOrFail($activityId);
+
+        $filename = 'Rekap-Kegiatan-'.$activity->name.'-'.$date
+            .($kelas ? '-Kelas-'.$kelas : '')
+            .($kamar ? '-Kamar-'.$kamar : '')
+            .'.xlsx';
+
+        return Excel::download(
+            new ActivityRecapExport(
+                $date,
+                $activity->id,
+                $activity->name,
+                $kelas,
+                $kamar
+            ),
+            $filename
+        );
     }
 }
